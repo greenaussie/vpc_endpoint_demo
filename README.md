@@ -1,12 +1,10 @@
 # AWS VPC Interface Endpoint DNS demo
 
-A demo to show how AWS DNS listen responds differently when a VPC interface endpoint has been created.
+A demo to show how AWS DNS listener responds differently when a VPC interface endpoint has been created.
 
 When a VPC endpoint is created, api requests should to use that endpoint, rather than the public endpoint. This improves security, because AWS resources deployed on our VPC do not need to have internet access (via a route to 0.0.0.0/0) to make API calls.
 
 Most systems deployed on AWS resources need to make API requests to AWS services. For instance, it may be necessary for the system to be able to check a volume attachment is available (`aws ec2 describe-volumes...`).
-
-
 
 Steps:
 
@@ -24,7 +22,7 @@ Creates an instance. It has a security group (so for clarity, we won't use the d
 
 The instance user-data installs a utilities: nmap, bind-utils, tmux, tcpdump, which we might need.
 
-### 4. Lets log !
+### 4. Lets log in!
 
 Im using the EC2 Session manager for login.
 
