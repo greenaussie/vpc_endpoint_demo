@@ -1,0 +1,317 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: | 
+  
+  Demo VPC endpoint split DNS effect
+
+  (or why you should use AmazonDNS resolvers)
+
+Resources:
+
+  # Network basics two subnets each with its own route table
+  # which by default has a route which reaches the whole VPC.
+  # When we create the route tables, they are initially identical.
+  #
+  # Notice I swithed on DNS support and DNS hostnames - this registers
+  # my instance with Amazon private DNS and enables reverse lookups
+  # which is required.
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "192.168.0.0/24"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+
+  VpcDhcpOptions:
+    Type: "AWS::EC2::DHCPOptions"
+    Properties:
+      DomainNameServers:
+        - AmazonProvidedDNS
+
+  VpcDHCPOptionsAssociation:
+    Type: "AWS::EC2::VPCDHCPOptionsAssociation"
+    Properties:
+      DhcpOptionsId: !Ref VpcDhcpOptions
+      VpcId: !Ref Vpc
+
+  SubnetPublic:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: ap-southeast-2a
+      CidrBlock: 192.168.0.0/26
+      VpcId: !Ref Vpc
+
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref Vpc
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref SubnetPublic
+    
+  SubnetPrivate:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: ap-southeast-2a
+      CidrBlock: 192.168.0.64/26
+      VpcId: !Ref Vpc
+  
+  PrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref Vpc
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PrivateSubnetRouteTable
+      SubnetId: !Ref SubnetPrivate
+  
+  # Internet gateway is created and a route to is
+  # is added to the public route table
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  InternetGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties: 
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+
+  # Now lets add a NAT gateway within the public subnet
+  # so that we can add it as a route for resources deployed
+  # to our private subnet. We need to allocate an elastic IP 
+  # address first (EIP)
+  
+  NatGatewayEip:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+       Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEip.AllocationId
+      SubnetId: !Ref SubnetPublic
+
+  NatGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties: 
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnetRouteTable
+
+  # At this point we'll deploy an EC2 instance which is running
+  # the AWS SSM agent. My instance will assume a role which gives
+  # it permission to access the SSM service. I am using a managed
+  # policy for that rol, but it is instructive to look at the policy
+  # in detail, because it shows us the service names:
+  #
+  # https://console.aws.amazon.com/iam/home?region=ap-southeast-2#/policies/arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore$jsonEditor
+  # 
+  # The SSM agent makes outboud API requests to three AWS public
+  # endpoints, and it allows us to, for the sake of this demo,
+  # get a console prompt on the server via the AWS console, rather
+  # than using SSH.
+  # 
+  # Each AWS region has it's own endpoints for each AWS service
+  # with a few exceptions. To use SSM from the ap-southeast-2
+  # region I need to be able to access these end points.
+  #
+  # My instance is based on AmazonLinux2, so it has the SSM agent
+  # installed by default. This AMI may not be available from your account
+  # but you could use an AWS public AMI instead.
+  # 
+  # The security group we create allows outbound traffic only.
+  
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: ec2-describe-instances
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                Resource: "*"
+  
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: 
+        - !Ref InstanceRole
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Demo Security Group
+      VpcId:
+        Ref: Vpc
+  
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t3.micro"
+      ImageId: ami-0772e8a357d9d4350
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/xvda"
+          Ebs: 
+            VolumeType: "gp2"
+            VolumeSize: "8"
+            Encrypted: true
+      SecurityGroupIds:
+        - !Ref  SecurityGroup
+      SubnetId: !Ref SubnetPrivate
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          export HOST_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+          export MACHINE_NAME=$(tr '.' '-' <<<$HOST_IP)
+          export AWS_INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          export AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          export AWS_REGION="`echo \"$AWS_AVAIL_ZONE\" | sed 's/[a-z]$//'`"
+          echo "export AWS_DEFAULT_REGION=${!AWS_REGION}" >> /etc/bashrc
+
+          yum update -y
+          yum install -y bind-utils tmux nmap nmap-ncat tcpdump
+
+  # Lets use the SSM Web console page to get a session and look up the API end-points
+  # for the EC2 service:
+  #
+  #     # dig ec2.ap-southeast-2.amazonaws.com
+  #
+  #     ; <<>> DiG 9.11.4-P2-RedHat-9.11.4-9.P2.amzn2.0.4 <<>> ec2.ap-southeast-2.amazonaws.com
+  #     ;; global options: +cmd
+  #     ;; Got answer:
+  #     ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1306
+  #     ;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0
+  #
+  #     ;; QUESTION SECTION:
+  #     ;ec2.ap-southeast-2.amazonaws.com. IN   A
+  #
+  #     ;; ANSWER SECTION:
+  #     ec2.ap-southeast-2.amazonaws.com. 22 IN A       99.82.185.0
+  #
+  #     ;; Query time: 0 msec
+  #     ;; SERVER: 192.168.0.2#53(192.168.0.2)
+  #     ;; WHEN: Mon Aug 31 10:06:37 UTC 2020
+  #     ;; MSG SIZE  rcvd: 66
+
+
+  # Lets put in some VPC interface endpoints. These mean we can make API calls without
+  # leaving our of our VPC. Because they have interfaces, they have a security group - so we can
+  # control access to them (my security group is not restrictive). My endpoints cost a small amount
+  # and each consumes an ENI.
+  
+  InterfaceVpcEndpointSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: VPC interface endpoint security group
+      SecurityGroupEgress:
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        - CidrIp: 192.168.0.0/24
+          IpProtocol: "tcp"
+          FromPort: "443"
+          ToPort: "443"
+      VpcId: !Ref Vpc
+
+  Ec2MessagesVpcEndpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      PrivateDnsEnabled: "true"
+      SecurityGroupIds:
+        - !Ref InterfaceVpcEndpointSecurityGroup
+      ServiceName: !Join [ "", [ "com.amazonaws.", !Ref "AWS::Region", ".ec2messages" ] ]
+      SubnetIds:
+        - !Ref SubnetPrivate
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+
+  SsmVpcEndpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      PrivateDnsEnabled: "true"
+      SecurityGroupIds:
+        - !Ref InterfaceVpcEndpointSecurityGroup
+      ServiceName: !Join [ "", [ "com.amazonaws.", !Ref "AWS::Region", ".ssm" ] ]
+      SubnetIds:
+        - !Ref SubnetPrivate
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+
+  SsmMessagesVpcEndpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      PrivateDnsEnabled: "true"
+      SecurityGroupIds:
+        - !Ref InterfaceVpcEndpointSecurityGroup
+      ServiceName: !Join [ "", [ "com.amazonaws.", !Ref "AWS::Region", ".ssmmessages" ] ]
+      SubnetIds:
+        - !Ref SubnetPrivate
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+  
+  Ec2VpcEndpoint:
+    Type: "AWS::EC2::VPCEndpoint"
+    Properties:
+      PrivateDnsEnabled: "true"
+      SecurityGroupIds:
+        - !Ref InterfaceVpcEndpointSecurityGroup
+      ServiceName: !Join [ "", [ "com.amazonaws.", !Ref "AWS::Region", ".ec2" ] ]
+      SubnetIds:
+        - !Ref SubnetPrivate
+      VpcEndpointType: Interface
+      VpcId: !Ref Vpc
+
+# So now lets repeat our lookup
+#
+#
+#    # dig ec2.ap-southeast-2.amazonaws.com
+#    
+#    ; <<>> DiG 9.11.4-P2-RedHat-9.11.4-9.P2.amzn2.0.4 <<>> ec2.ap-southeast-2.amazonaws.com
+#    ;; global options: +cmd
+#    ;; Got answer:
+#    ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 62494
+#    ;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+#    
+#    ;; OPT PSEUDOSECTION:
+#    ; EDNS: version: 0, flags:; udp: 4096
+#    ;; QUESTION SECTION:
+#    ;ec2.ap-southeast-2.amazonaws.com. IN   A
+#    
+#    ;; ANSWER SECTION:
+#    ec2.ap-southeast-2.amazonaws.com. 52 IN A       192.168.0.73
+#    
+#    ;; Query time: 0 msec
+#    ;; SERVER: 192.168.0.2#53(192.168.0.2)
+#    ;; WHEN: Mon Aug 31 10:38:08 UTC 2020
+#    ;; MSG SIZE  rcvd: 77
